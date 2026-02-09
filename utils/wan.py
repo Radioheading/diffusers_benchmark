@@ -1,7 +1,10 @@
+import importlib.util
 from typing import Any
 
 import torch
 from diffusers import AutoencoderKLWan, WanPipeline
+
+from utils.fp8 import FP8_FALLBACK_QUANT_TYPES, FP8_FASTEST_QUANT_TYPE, FP8_SAFE_QUANT_TYPE, build_torchao_config
 
 LIGHTX2V_REPO = "Kijai/WanVideo_comfy"
 LIGHTX2V_HIGH_WEIGHT_CANDIDATES = (
@@ -22,16 +25,75 @@ def load_wan_pipeline(
     model_id: str,
     dtype: torch.dtype,
     vae_dtype: torch.dtype = torch.float32,
-) -> Any:
-    vae = AutoencoderKLWan.from_pretrained(
-        model_id,
-        subfolder="vae",
-        torch_dtype=vae_dtype,
-    )
-    return WanPipeline.from_pretrained(
-        model_id,
-        vae=vae,
-        torch_dtype=dtype,
+    quantization: str = "none",
+    fp8_quant_type: str = FP8_FASTEST_QUANT_TYPE,
+) -> tuple[Any, str]:
+    if quantization == "none":
+        vae = AutoencoderKLWan.from_pretrained(
+            model_id,
+            subfolder="vae",
+            torch_dtype=vae_dtype,
+        )
+        return (
+            WanPipeline.from_pretrained(
+                model_id,
+                vae=vae,
+                torch_dtype=dtype,
+            ),
+            "none",
+        )
+
+    if quantization != "fp8_e4m3":
+        raise ValueError(f"Unsupported quantization mode: {quantization}")
+    if importlib.util.find_spec("torchao") is None:
+        raise RuntimeError(
+            "FP8 quantization requires torchao. Install it first, for example: pip install torchao"
+        )
+
+    from diffusers import WanTransformer3DModel
+
+    candidate_quant_types = [fp8_quant_type]
+    if fp8_quant_type == FP8_FASTEST_QUANT_TYPE:
+        candidate_quant_types.extend((FP8_SAFE_QUANT_TYPE, *FP8_FALLBACK_QUANT_TYPES))
+
+    attempted = []
+    last_error = None
+    for quant_type in candidate_quant_types:
+        attempted.append(quant_type)
+        try:
+            quant_config = build_torchao_config(quant_type)
+            transformer = WanTransformer3DModel.from_pretrained(
+                model_id,
+                subfolder="transformer",
+                quantization_config=quant_config,
+                torch_dtype=dtype,
+            )
+            transformer_2 = WanTransformer3DModel.from_pretrained(
+                model_id,
+                subfolder="transformer_2",
+                quantization_config=quant_config,
+                torch_dtype=dtype,
+            )
+            vae = AutoencoderKLWan.from_pretrained(
+                model_id,
+                subfolder="vae",
+                torch_dtype=vae_dtype,
+            )
+            pipe = WanPipeline.from_pretrained(
+                model_id,
+                vae=vae,
+                transformer=transformer,
+                transformer_2=transformer_2,
+                torch_dtype=dtype,
+            )
+            return pipe, quant_type
+        except Exception as exc:
+            print(f"[warn] failed to load fp8 quantization with quant_type={quant_type}: {exc}")
+            last_error = exc
+
+    raise RuntimeError(
+        f"Unable to load FP8 quantization for {model_id}. Tried quantization types: {attempted}. "
+        f"Last error: {last_error}"
     )
 
 

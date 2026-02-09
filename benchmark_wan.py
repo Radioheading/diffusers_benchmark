@@ -6,6 +6,7 @@ from diffusers.utils import export_to_video
 
 from utils.compile import maybe_compile_pipeline
 from utils.device import resolve_device
+from utils.fp8 import FP8_FASTEST_QUANT_TYPE
 from utils.wan import enable_lightx2v, load_wan_pipeline, run_wan_inference
 
 MODEL_ID = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
@@ -91,6 +92,20 @@ def build_parser() -> argparse.ArgumentParser:
             f"{LIGHTX2V_GUIDANCE_SCALE}/{LIGHTX2V_GUIDANCE_SCALE_2}"
         ),
     )
+    parser.add_argument(
+        "--quantization",
+        choices=("none", "fp8_e4m3"),
+        default="none",
+        help="quantization mode: fp8_e4m3 uses dynamic activation + weight float8 e4m3 via TorchAO",
+    )
+    parser.add_argument(
+        "--fp8-quant-type",
+        default=FP8_FASTEST_QUANT_TYPE,
+        help=(
+            "TorchAO FP8 quant type to use for --quantization fp8_e4m3. "
+            "Fast default is float8dq_e4m3_row; fallback tries safer variants on load failure"
+        ),
+    )
     return parser
 
 
@@ -161,11 +176,17 @@ def main() -> None:
         print(
             f"[warn] Running on {device}. For AMD GPU acceleration, use ROCm PyTorch and ensure /dev/kfd access."
         )
+    if args.quantization != "none" and device.type != "cuda":
+        raise RuntimeError(
+            f"Quantization mode '{args.quantization}' requires CUDA device. Resolved device was: {device}."
+        )
 
-    pipe = load_wan_pipeline(
+    pipe, quantization_used = load_wan_pipeline(
         model_id=args.model_id,
         dtype=dtype,
         vae_dtype=torch.float32,
+        quantization=args.quantization,
+        fp8_quant_type=args.fp8_quant_type,
     )
     pipe.to(device)
     if args.lightx2v:
@@ -190,7 +211,7 @@ def main() -> None:
 
     output_frames = run_warmup_and_measured(pipe=pipe, args=args, device=device)
     export_to_video(output_frames, args.output, fps=args.fps)
-    print(f"[ok] saved video to {args.output} using device={device} dtype={dtype}")
+    print(f"[ok] saved video to {args.output} using device={device} dtype={dtype} quantization={quantization_used}")
 
 
 if __name__ == "__main__":
