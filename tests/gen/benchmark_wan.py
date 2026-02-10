@@ -1,5 +1,11 @@
 import argparse
+import sys
 import time
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import torch
 from diffusers.utils import export_to_video
@@ -24,6 +30,131 @@ DEFAULT_NEGATIVE_PROMPT = (
     "画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，"
     "杂乱的背景，三条腿，背景人很多，倒着走"
 )
+
+WAN_VAE_SCALE_FACTOR_SPATIAL = 8
+WAN_VAE_SCALE_FACTOR_TEMPORAL = 4
+WAN_PATCH_SIZE = (1, 2, 2)
+WAN_IN_CHANNELS = 16
+WAN_TEXT_DIM = 4096
+WAN_INNER_DIM = 40 * 128
+WAN_FFN_DIM = 13824
+WAN_NUM_LAYERS = 40
+WAN_DEFAULT_TEXT_SEQ_LEN = 512
+
+
+def derive_wan_linear_gemm_shapes(
+    height: int = 720,
+    width: int = 1280,
+    frames: int = 81,
+    text_seq_len: int = WAN_DEFAULT_TEXT_SEQ_LEN,
+) -> dict:
+    if height <= 0 or width <= 0 or frames <= 0:
+        raise ValueError(f"height/width/frames must be > 0, got {height}/{width}/{frames}")
+    if text_seq_len <= 0:
+        raise ValueError(f"text_seq_len must be > 0, got {text_seq_len}")
+
+    # Wan pipeline rounds num_frames to satisfy (num_frames - 1) % 4 == 0.
+    effective_frames = frames
+    if effective_frames % WAN_VAE_SCALE_FACTOR_TEMPORAL != 1:
+        effective_frames = effective_frames // WAN_VAE_SCALE_FACTOR_TEMPORAL * WAN_VAE_SCALE_FACTOR_TEMPORAL + 1
+    effective_frames = max(effective_frames, 1)
+
+    latent_frames = (effective_frames - 1) // WAN_VAE_SCALE_FACTOR_TEMPORAL + 1
+    latent_height = int(height) // WAN_VAE_SCALE_FACTOR_SPATIAL
+    latent_width = int(width) // WAN_VAE_SCALE_FACTOR_SPATIAL
+
+    patch_t, patch_h, patch_w = WAN_PATCH_SIZE
+    post_patch_frames = latent_frames // patch_t
+    post_patch_height = latent_height // patch_h
+    post_patch_width = latent_width // patch_w
+    latent_seq_len = post_patch_frames * post_patch_height * post_patch_width
+
+    shapes = [
+        {
+            "name": "wan.text_proj_in",
+            "m": text_seq_len,
+            "k": WAN_TEXT_DIM,
+            "n": WAN_INNER_DIM,
+            "occurrences": 1,
+        },
+        {
+            "name": "wan.text_proj_out",
+            "m": text_seq_len,
+            "k": WAN_INNER_DIM,
+            "n": WAN_INNER_DIM,
+            "occurrences": 1,
+        },
+        {
+            "name": "wan.self_attn_qkv",
+            "m": latent_seq_len,
+            "k": WAN_INNER_DIM,
+            "n": WAN_INNER_DIM,
+            "occurrences": WAN_NUM_LAYERS * 3,
+        },
+        {
+            "name": "wan.self_attn_out",
+            "m": latent_seq_len,
+            "k": WAN_INNER_DIM,
+            "n": WAN_INNER_DIM,
+            "occurrences": WAN_NUM_LAYERS,
+        },
+        {
+            "name": "wan.cross_attn_q",
+            "m": latent_seq_len,
+            "k": WAN_INNER_DIM,
+            "n": WAN_INNER_DIM,
+            "occurrences": WAN_NUM_LAYERS,
+        },
+        {
+            "name": "wan.cross_attn_kv",
+            "m": text_seq_len,
+            "k": WAN_INNER_DIM,
+            "n": WAN_INNER_DIM,
+            "occurrences": WAN_NUM_LAYERS * 2,
+        },
+        {
+            "name": "wan.cross_attn_out",
+            "m": latent_seq_len,
+            "k": WAN_INNER_DIM,
+            "n": WAN_INNER_DIM,
+            "occurrences": WAN_NUM_LAYERS,
+        },
+        {
+            "name": "wan.ffn_in",
+            "m": latent_seq_len,
+            "k": WAN_INNER_DIM,
+            "n": WAN_FFN_DIM,
+            "occurrences": WAN_NUM_LAYERS,
+        },
+        {
+            "name": "wan.ffn_out",
+            "m": latent_seq_len,
+            "k": WAN_FFN_DIM,
+            "n": WAN_INNER_DIM,
+            "occurrences": WAN_NUM_LAYERS,
+        },
+        {
+            "name": "wan.proj_out",
+            "m": latent_seq_len,
+            "k": WAN_INNER_DIM,
+            "n": WAN_IN_CHANNELS * patch_t * patch_h * patch_w,
+            "occurrences": 1,
+        },
+    ]
+
+    return {
+        "model": MODEL_ID,
+        "height": height,
+        "width": width,
+        "frames": frames,
+        "effective_frames": effective_frames,
+        "latent_frames": latent_frames,
+        "latent_height": latent_height,
+        "latent_width": latent_width,
+        "latent_seq_len": latent_seq_len,
+        "text_seq_len": text_seq_len,
+        "shapes": shapes,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:

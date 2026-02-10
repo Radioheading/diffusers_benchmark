@@ -1,5 +1,12 @@
 import argparse
+import sys
 import time
+from functools import lru_cache
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import torch
 
@@ -8,8 +15,8 @@ from utils.device import resolve_device
 from utils.fp8 import (
     FP8_FASTEST_QUANT_TYPE,
     FP8_SAFE_QUANT_TYPE,
-    load_qwen_pipeline,
     is_fully_black_image,
+    load_qwen_pipeline,
 )
 from utils.generation import run_inference
 
@@ -23,6 +30,225 @@ DEFAULT_PROMPT = (
     'with a neon light beside it displaying "通义千问". Next to it hangs a poster showing a beautiful '
     'Chinese woman, and beneath the poster is written "π≈3.1415926-53589793-23846264-33832795-02384197".'
 )
+
+QWEN_VAE_SCALE_FACTOR = 8
+QWEN_PACK_FACTOR = 2
+QWEN_IN_CHANNELS = 64
+QWEN_JOINT_ATTENTION_DIM = 3584
+QWEN_INNER_DIM = 24 * 128
+QWEN_FFN_DIM = 4 * QWEN_INNER_DIM
+QWEN_NUM_LAYERS = 60
+QWEN_DEFAULT_PROMPT_SEQ_LEN = 117
+QWEN_DEFAULT_NEGATIVE_PROMPT_SEQ_LEN = 6
+QWEN_PROMPT_TEMPLATE = (
+    "<|im_start|>system\n"
+    "Describe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships "
+    "of the objects and background:<|im_end|>\n"
+    "<|im_start|>user\n{}<|im_end|>\n"
+    "<|im_start|>assistant\n"
+)
+QWEN_PROMPT_TEMPLATE_DROP_IDX = 34
+
+
+def resolve_final_prompt(prompt: str, prompt_lang: str) -> str:
+    if prompt_lang == "none":
+        return prompt
+    return prompt + POSITIVE_MAGIC[prompt_lang]
+
+
+def _estimate_qwen_text_seq_len(
+    prompt: str,
+    max_sequence_length: int,
+    fallback_seq_len: int,
+) -> int:
+    # QwenImage uses a Qwen2 tokenizer with prompt template + fixed start-index drop.
+    try:
+        tokenizer = _load_qwen_tokenizer()
+        encoded = tokenizer(
+            [QWEN_PROMPT_TEMPLATE.format(prompt)],
+            max_length=1024 + QWEN_PROMPT_TEMPLATE_DROP_IDX,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+        )
+        total_len = int(encoded.attention_mask[0].sum().item())
+        seq_len = max(1, total_len - QWEN_PROMPT_TEMPLATE_DROP_IDX)
+        return min(seq_len, max_sequence_length)
+    except Exception:
+        return min(max(1, fallback_seq_len), max_sequence_length)
+
+
+@lru_cache(maxsize=1)
+def _load_qwen_tokenizer():
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct", trust_remote_code=True)
+
+
+def derive_qwen_linear_gemm_shapes(
+    height: int = 1328,
+    width: int = 1328,
+    prompt: str = DEFAULT_PROMPT,
+    prompt_lang: str = "en",
+    negative_prompt: str = " ",
+    max_sequence_length: int = 512,
+    prompt_seq_len: int | None = None,
+    negative_prompt_seq_len: int | None = None,
+    include_negative_prompt_shapes: bool = False,
+) -> dict:
+    if height <= 0 or width <= 0:
+        raise ValueError(f"height and width must be > 0, got height={height}, width={width}")
+    if max_sequence_length <= 0:
+        raise ValueError(f"max_sequence_length must be > 0, got {max_sequence_length}")
+
+    final_prompt = resolve_final_prompt(prompt=prompt, prompt_lang=prompt_lang)
+    if prompt_seq_len is None:
+        prompt_seq_len = _estimate_qwen_text_seq_len(
+            prompt=final_prompt,
+            max_sequence_length=max_sequence_length,
+            fallback_seq_len=QWEN_DEFAULT_PROMPT_SEQ_LEN,
+        )
+    if negative_prompt_seq_len is None:
+        negative_prompt_seq_len = _estimate_qwen_text_seq_len(
+            prompt=negative_prompt,
+            max_sequence_length=max_sequence_length,
+            fallback_seq_len=QWEN_DEFAULT_NEGATIVE_PROMPT_SEQ_LEN,
+        )
+
+    latent_h = 2 * (int(height) // (QWEN_VAE_SCALE_FACTOR * QWEN_PACK_FACTOR))
+    latent_w = 2 * (int(width) // (QWEN_VAE_SCALE_FACTOR * QWEN_PACK_FACTOR))
+    image_seq_len = (latent_h // QWEN_PACK_FACTOR) * (latent_w // QWEN_PACK_FACTOR)
+
+    shapes = [
+        {
+            "name": "qwen.img_in",
+            "m": image_seq_len,
+            "k": QWEN_IN_CHANNELS,
+            "n": QWEN_INNER_DIM,
+            "occurrences": 1,
+        },
+        {
+            "name": "qwen.img_attn_qkv",
+            "m": image_seq_len,
+            "k": QWEN_INNER_DIM,
+            "n": QWEN_INNER_DIM,
+            "occurrences": QWEN_NUM_LAYERS * 3,
+        },
+        {
+            "name": "qwen.img_attn_out",
+            "m": image_seq_len,
+            "k": QWEN_INNER_DIM,
+            "n": QWEN_INNER_DIM,
+            "occurrences": QWEN_NUM_LAYERS,
+        },
+        {
+            "name": "qwen.img_ffn_in",
+            "m": image_seq_len,
+            "k": QWEN_INNER_DIM,
+            "n": QWEN_FFN_DIM,
+            "occurrences": QWEN_NUM_LAYERS,
+        },
+        {
+            "name": "qwen.img_ffn_out",
+            "m": image_seq_len,
+            "k": QWEN_FFN_DIM,
+            "n": QWEN_INNER_DIM,
+            "occurrences": QWEN_NUM_LAYERS,
+        },
+        {
+            "name": "qwen.proj_out",
+            "m": image_seq_len,
+            "k": QWEN_INNER_DIM,
+            "n": QWEN_IN_CHANNELS,
+            "occurrences": 1,
+        },
+        {
+            "name": "qwen.txt_in(prompt)",
+            "m": prompt_seq_len,
+            "k": QWEN_JOINT_ATTENTION_DIM,
+            "n": QWEN_INNER_DIM,
+            "occurrences": 1,
+        },
+        {
+            "name": "qwen.txt_attn_qkv(prompt)",
+            "m": prompt_seq_len,
+            "k": QWEN_INNER_DIM,
+            "n": QWEN_INNER_DIM,
+            "occurrences": QWEN_NUM_LAYERS * 3,
+        },
+        {
+            "name": "qwen.txt_attn_out(prompt)",
+            "m": prompt_seq_len,
+            "k": QWEN_INNER_DIM,
+            "n": QWEN_INNER_DIM,
+            "occurrences": QWEN_NUM_LAYERS,
+        },
+        {
+            "name": "qwen.txt_ffn_in(prompt)",
+            "m": prompt_seq_len,
+            "k": QWEN_INNER_DIM,
+            "n": QWEN_FFN_DIM,
+            "occurrences": QWEN_NUM_LAYERS,
+        },
+        {
+            "name": "qwen.txt_ffn_out(prompt)",
+            "m": prompt_seq_len,
+            "k": QWEN_FFN_DIM,
+            "n": QWEN_INNER_DIM,
+            "occurrences": QWEN_NUM_LAYERS,
+        },
+    ]
+
+    if include_negative_prompt_shapes:
+        shapes.extend(
+            [
+                {
+                    "name": "qwen.txt_in(negative)",
+                    "m": negative_prompt_seq_len,
+                    "k": QWEN_JOINT_ATTENTION_DIM,
+                    "n": QWEN_INNER_DIM,
+                    "occurrences": 1,
+                },
+                {
+                    "name": "qwen.txt_attn_qkv(negative)",
+                    "m": negative_prompt_seq_len,
+                    "k": QWEN_INNER_DIM,
+                    "n": QWEN_INNER_DIM,
+                    "occurrences": QWEN_NUM_LAYERS * 3,
+                },
+                {
+                    "name": "qwen.txt_attn_out(negative)",
+                    "m": negative_prompt_seq_len,
+                    "k": QWEN_INNER_DIM,
+                    "n": QWEN_INNER_DIM,
+                    "occurrences": QWEN_NUM_LAYERS,
+                },
+                {
+                    "name": "qwen.txt_ffn_in(negative)",
+                    "m": negative_prompt_seq_len,
+                    "k": QWEN_INNER_DIM,
+                    "n": QWEN_FFN_DIM,
+                    "occurrences": QWEN_NUM_LAYERS,
+                },
+                {
+                    "name": "qwen.txt_ffn_out(negative)",
+                    "m": negative_prompt_seq_len,
+                    "k": QWEN_FFN_DIM,
+                    "n": QWEN_INNER_DIM,
+                    "occurrences": QWEN_NUM_LAYERS,
+                },
+            ]
+        )
+
+    return {
+        "model": MODEL_ID,
+        "height": height,
+        "width": width,
+        "image_seq_len": image_seq_len,
+        "prompt_seq_len": prompt_seq_len,
+        "negative_prompt_seq_len": negative_prompt_seq_len,
+        "shapes": shapes,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -106,10 +332,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run_warmup_and_measured(pipe, args, device: torch.device, stage_label: str = ""):
     suffix = f" {stage_label}" if stage_label else ""
-    if args.prompt_lang == "none":
-        final_prompt = args.prompt
-    else:
-        final_prompt = args.prompt + POSITIVE_MAGIC[args.prompt_lang]
+    final_prompt = resolve_final_prompt(prompt=args.prompt, prompt_lang=args.prompt_lang)
     print(f"[info] warmup inference{suffix} (cold start)")
     _ = run_inference(
         pipe=pipe,
