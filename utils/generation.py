@@ -31,6 +31,9 @@ def run_inference(
     generator_device: str,
     run_device: torch.device,
 ):
+    # Avoid CUDAGraph output reuse errors across repeated compiled pipeline calls.
+    if hasattr(torch, "compiler") and hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+        torch.compiler.cudagraph_mark_step_begin()
     generator = make_generator(seed=seed, generator_device=generator_device, run_device=run_device)
     return pipe(
         prompt,

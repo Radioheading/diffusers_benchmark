@@ -8,6 +8,13 @@ FP8_FASTEST_QUANT_TYPE = "float8dq_e4m3_row"
 FP8_FALLBACK_QUANT_TYPES = ("float8dq",)
 
 
+def preferred_e4m3_dtype() -> torch.dtype:
+    # ROCm kernels use FNUZ encoding for float8 e4m3.
+    if getattr(torch.version, "hip", None) is not None and hasattr(torch, "float8_e4m3fnuz"):
+        return torch.float8_e4m3fnuz
+    return torch.float8_e4m3fn
+
+
 def build_torchao_config(quant_type: str):
     from diffusers import TorchAoConfig
 
@@ -17,19 +24,21 @@ def build_torchao_config(quant_type: str):
     except Exception:
         return TorchAoConfig(quant_type)
 
+    fp8_dtype = preferred_e4m3_dtype()
+
     if quant_type == "float8dq_e4m3_row":
         return TorchAoConfig(
             Float8DynamicActivationFloat8WeightConfig(
-                activation_dtype=torch.float8_e4m3fn,
-                weight_dtype=torch.float8_e4m3fn,
+                activation_dtype=fp8_dtype,
+                weight_dtype=fp8_dtype,
                 granularity=PerRow(),
             )
         )
     if quant_type == "float8dq_e4m3":
         return TorchAoConfig(
             Float8DynamicActivationFloat8WeightConfig(
-                activation_dtype=torch.float8_e4m3fn,
-                weight_dtype=torch.float8_e4m3fn,
+                activation_dtype=fp8_dtype,
+                weight_dtype=fp8_dtype,
                 granularity=PerTensor(),
             )
         )

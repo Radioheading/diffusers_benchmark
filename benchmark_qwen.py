@@ -182,7 +182,32 @@ def main() -> None:
             f"[info] using seed={args.seed} generator_device={args.generator_device}. "
             "Warmup and measured runs will reuse the same seed."
         )
-    image = run_warmup_and_measured(pipe=pipe, args=args, device=device)
+    try:
+        image = run_warmup_and_measured(pipe=pipe, args=args, device=device)
+    except Exception as exc:
+        retry_without_compile = args.quantization == "fp8_e4m3" and compile_enabled
+        if not retry_without_compile:
+            raise
+        print(
+            f"[warn] FP8 run failed with torch.compile enabled ({type(exc).__name__}: {exc}). "
+            "Retrying with torch.compile disabled."
+        )
+        del pipe
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        pipe, quantization_used = load_qwen_pipeline(
+            model_id=args.model_id,
+            dtype=dtype,
+            quantization=args.quantization,
+            fp8_quant_type=quantization_used,
+        )
+        pipe.to(device)
+        image = run_warmup_and_measured(
+            pipe=pipe,
+            args=args,
+            device=device,
+            stage_label="after compile fallback",
+        )
 
     if args.quantization == "fp8_e4m3" and is_fully_black_image(image):
         print(

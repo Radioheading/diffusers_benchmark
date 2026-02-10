@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--seed",
         type=int,
-        default=None,
+        default=1234,
         help="random seed for diffusion latents; leave unset to use random sampling",
     )
     parser.add_argument(
