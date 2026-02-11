@@ -237,6 +237,14 @@ def build_parser() -> argparse.ArgumentParser:
             "Fast default is float8dq_e4m3_row; fallback tries safer variants on load failure"
         ),
     )
+    parser.add_argument(
+        "--quant-t2-only",
+        action="store_true",
+        help=(
+            "with --quantization fp8_e4m3, quantize only transformer_2 to FP8 "
+            "(keep transformer in torch_dtype)"
+        ),
+    )
     return parser
 
 
@@ -311,6 +319,8 @@ def main() -> None:
         raise RuntimeError(
             f"Quantization mode '{args.quantization}' requires CUDA device. Resolved device was: {device}."
         )
+    if args.quant_t2_only and args.quantization != "fp8_e4m3":
+        raise ValueError("--quant-t2-only requires --quantization fp8_e4m3")
 
     pipe, quantization_used = load_wan_pipeline(
         model_id=args.model_id,
@@ -318,6 +328,7 @@ def main() -> None:
         vae_dtype=torch.float32,
         quantization=args.quantization,
         fp8_quant_type=args.fp8_quant_type,
+        quant_t2_only=args.quant_t2_only,
     )
     pipe.to(device)
     if args.lightx2v:

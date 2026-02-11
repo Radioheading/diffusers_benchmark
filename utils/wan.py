@@ -27,7 +27,14 @@ def load_wan_pipeline(
     vae_dtype: torch.dtype = torch.float32,
     quantization: str = "none",
     fp8_quant_type: str = FP8_FASTEST_QUANT_TYPE,
+    quant_t2_only: bool = False,
 ) -> tuple[Any, str]:
+    if quant_t2_only and quantization != "fp8_e4m3":
+        raise ValueError("quant_t2_only requires quantization='fp8_e4m3'")
+
+    if quant_t2_only:
+        print("[info] loading WAN pipeline with FP8 quantization for transformer_2 only")
+        
     if quantization == "none":
         vae = AutoencoderKLWan.from_pretrained(
             model_id,
@@ -62,12 +69,19 @@ def load_wan_pipeline(
         attempted.append(quant_type)
         try:
             quant_config = build_torchao_config(quant_type)
-            transformer = WanTransformer3DModel.from_pretrained(
-                model_id,
-                subfolder="transformer",
-                quantization_config=quant_config,
-                torch_dtype=dtype,
-            )
+            if quant_t2_only:
+                transformer = WanTransformer3DModel.from_pretrained(
+                    model_id,
+                    subfolder="transformer",
+                    torch_dtype=dtype,
+                )
+            else:
+                transformer = WanTransformer3DModel.from_pretrained(
+                    model_id,
+                    subfolder="transformer",
+                    quantization_config=quant_config,
+                    torch_dtype=dtype,
+                )
             transformer_2 = WanTransformer3DModel.from_pretrained(
                 model_id,
                 subfolder="transformer_2",
@@ -86,6 +100,8 @@ def load_wan_pipeline(
                 transformer_2=transformer_2,
                 torch_dtype=dtype,
             )
+            if quant_t2_only:
+                return pipe, f"{quant_type}(transformer_2_only)"
             return pipe, quant_type
         except Exception as exc:
             print(f"[warn] failed to load fp8 quantization with quant_type={quant_type}: {exc}")

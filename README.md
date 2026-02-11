@@ -5,15 +5,15 @@ Benchmark scripts for Qwen-Image and Wan2.2 on local hardware.
 ## Script paths
 
 - Generation benchmarks:
-  - `tests/gen/benchmark_qwen.py`
-  - `tests/gen/benchmark_wan.py`
+  - `diffusers_tests/gen/benchmark_qwen.py`
+  - `diffusers_tests/gen/benchmark_wan.py`
 - Operator microbenchmark:
-  - `tests/op/benchmark_gemm.py`
+  - `diffusers_tests/op/benchmark_gemm.py`
 
 ## Model coverage
 
-- `Qwen/Qwen-Image` via `tests/gen/benchmark_qwen.py`
-- `Wan-AI/Wan2.2-T2V-A14B-Diffusers` via `tests/gen/benchmark_wan.py`
+- `Qwen/Qwen-Image` via `diffusers_tests/gen/benchmark_qwen.py`
+- `Wan-AI/Wan2.2-T2V-A14B-Diffusers` via `diffusers_tests/gen/benchmark_wan.py`
 
 ## Shared features
 
@@ -23,43 +23,43 @@ Benchmark scripts for Qwen-Image and Wan2.2 on local hardware.
 - Optional FP8 loading for generation scripts via `--quantization fp8_e4m3`
 - Timing:
   - generation scripts run 1 warmup pass + 1 measured pass
-  - `tests/op/benchmark_gemm.py` uses CUDA event timing with configurable warmup/iters
+  - `diffusers_tests/op/benchmark_gemm.py` uses CUDA event timing with configurable warmup/iters
 
 ## Quick usage
 
 Qwen (BF16 GPU):
 
 ```bash
-python tests/gen/benchmark_qwen.py --device gpu --no-compile --output outputs/test_qwen/gpu.png
+python diffusers_tests/gen/benchmark_qwen.py --device gpu --no-compile --output outputs/test_qwen/gpu.png
 ```
 
 Qwen (FP8 GPU):
 
 ```bash
-python tests/gen/benchmark_qwen.py --device gpu --no-compile --quantization fp8_e4m3 --fp8-quant-type float8dq_e4m3 --output outputs/test_qwen/gpu_fp8.png
+python diffusers_tests/gen/benchmark_qwen.py --device gpu --no-compile --quantization fp8_e4m3 --fp8-quant-type float8dq_e4m3 --output outputs/test_qwen/gpu_fp8.png
 ```
 
 Qwen (CPU):
 
 ```bash
-python tests/gen/benchmark_qwen.py --device cpu --no-compile --output outputs/test_qwen/cpu.png
+python diffusers_tests/gen/benchmark_qwen.py --device cpu --no-compile --output outputs/test_qwen/cpu.png
 ```
 
 Wan2.2 (GPU):
 
 ```bash
-python tests/gen/benchmark_wan.py --device gpu --output outputs/test_wan/wan2_2.mp4
+python diffusers_tests/gen/benchmark_wan.py --device gpu --output outputs/test_wan/wan2_2.mp4
 ```
 
 Wan2.2 (CPU):
 
 ```bash
-python tests/gen/benchmark_wan.py --device cpu --no-compile --output outputs/test_wan/wan2_2_cpu.mp4
+python diffusers_tests/gen/benchmark_wan.py --device cpu --no-compile --output outputs/test_wan/wan2_2_cpu.mp4
 ```
 
 ## GEMM/Linear microbenchmark
 
-`tests/op/benchmark_gemm.py` benchmarks representative `M x K x N` shapes derived from Qwen/Wan configs.
+`diffusers_tests/op/benchmark_gemm.py` benchmarks representative `M x K x N` shapes derived from Qwen/Wan configs.
 
 - Requires CUDA (`--device cuda`/`cuda:0`)
 - Default modes: `bf16`, `bf16_compile`, `fp8_compile`
@@ -68,19 +68,19 @@ python tests/gen/benchmark_wan.py --device cpu --no-compile --output outputs/tes
 List the shape inventory only:
 
 ```bash
-python tests/op/benchmark_gemm.py --print-shapes-only
+python diffusers_tests/op/benchmark_gemm.py --print-shapes-only
 ```
 
 Run full Linear-module forward path (default target):
 
 ```bash
-python tests/op/benchmark_gemm.py --device cuda --bench-target linear --csv outputs/gemm/linear.csv
+python diffusers_tests/op/benchmark_gemm.py --device cuda --bench-target linear --csv outputs/gemm/linear.csv
 ```
 
 Run kernel-focused GEMM path:
 
 ```bash
-python tests/op/benchmark_gemm.py --device cuda --bench-target gemm --csv outputs/gemm/gemm.csv
+python diffusers_tests/op/benchmark_gemm.py --device cuda --bench-target gemm --csv outputs/gemm/gemm.csv
 ```
 
 Benchmark target behavior:

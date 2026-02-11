@@ -12,9 +12,36 @@ if str(REPO_ROOT) not in sys.path:
 import torch
 import torch.nn as nn
 
-from tests.gen.benchmark_qwen import DEFAULT_PROMPT as QWEN_DEFAULT_PROMPT
-from tests.gen.benchmark_qwen import derive_qwen_linear_gemm_shapes
-from tests.gen.benchmark_wan import derive_wan_linear_gemm_shapes
+
+def _module_is_under_path(mod, root: Path) -> bool:
+    module_file = getattr(mod, "__file__", None)
+    if module_file is not None:
+        resolved = Path(module_file).resolve()
+        if resolved == root or root in resolved.parents:
+            return True
+
+    module_paths = getattr(mod, "__path__", None)
+    if module_paths:
+        for module_path in module_paths:
+            resolved = Path(module_path).resolve()
+            if resolved == root or root in resolved.parents:
+                return True
+
+    return False
+
+
+# Some environments preload similarly named top-level packages.
+# Ensure we import this repo's "diffusers_tests" package.
+local_tests_root = REPO_ROOT / "diffusers_tests"
+loaded_tests = sys.modules.get("diffusers_tests")
+if loaded_tests is not None and not _module_is_under_path(loaded_tests, local_tests_root):
+    for module_name in tuple(sys.modules):
+        if module_name == "diffusers_tests" or module_name.startswith("diffusers_tests."):
+            del sys.modules[module_name]
+
+from diffusers_tests.gen.benchmark_qwen import DEFAULT_PROMPT as QWEN_DEFAULT_PROMPT
+from diffusers_tests.gen.benchmark_qwen import derive_qwen_linear_gemm_shapes
+from diffusers_tests.gen.benchmark_wan import derive_wan_linear_gemm_shapes
 
 MODE_BF16 = "bf16"
 MODE_BF16_COMPILE = "bf16_compile"
